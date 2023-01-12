@@ -1,3 +1,11 @@
+from helpers import *
+
+try:
+    import wandb
+except:
+    install('wandb')
+    import wandb
+
 import torch
 from matplotlib import pyplot as plt
 from IPython import display
@@ -5,9 +13,9 @@ import numpy as np
 import pandas as pd
 import argparse
 import json
-import wandb
 import os
-from helpers import *
+
+os.environ["WANDB_API_KEY"] = "4c2a9ff74fdb68f1f92a87d2ff834315f06a3530"
 os.environ["WANDB_SILENT"] = "true"
 
 
@@ -47,6 +55,7 @@ def optimise_input(model_name,
     optimised_inputs = set()
     #table_columns =['Optimised Input'] + [tokenizer.decode(t) for t in output_ix]
     optimised_inputs_table = pd.DataFrame()
+    optimised_inputs_strings = ''
 
     if output_len == None or output_len < output_ix.shape[0]:                    # This won't generally be the case, but if we don't specify output_len (i.e. it's == None), then...
         output_len = output_ix.shape[0]       # ...it will be set to the number of tokens in the encoding of the string 'target_output'
@@ -178,6 +187,7 @@ def optimise_input(model_name,
                 done = tokenizer.decode(model_outs[b][:input_len])
                 optimised_inputs.add(done)
                 optimised_inputs_table = optimised_inputs_table.append(pd.Series([done] + loss[b].detach().cpu().numpy().tolist()), ignore_index=True)
+                optimised_inputs_strings = optimised_inputs_strings + " '{}' ".format(done)
 
             if done is not None and rand_after:
                 input.data[b] = torch.rand_like(input[b])
@@ -187,7 +197,7 @@ def optimise_input(model_name,
         # Every w epochs we write to log, unless we have found an optimised input before that and 'return_early' == True. 
         # I'm still not entirely sure about the idea of 'return_early'.
 
-            wandb.log({'Optimised Inputs': optimised_inputs_table, 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
+            wandb.log({'Optimised Inputs': optimised_inputs_table,'Optimised Inputs Str': optimised_inputs_strings, 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
              
             print("Optimised Inputs:", optimised_inputs)
             print('{}/{} Output Loss: {} Emb Dist Loss: {} Perp Loss: {} LR: {}'.format(e+1, epochs, batch_loss, mean_token_dist, perp_loss, optimiser.param_groups[0]['lr']))
@@ -227,7 +237,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--wandb_user', type=str, default='jessicamarycooper')
     parser.add_argument('--model_name', type=str, default='gpt2')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--rand_after', action='store_true')
     parser.add_argument('--w_freq', type=int, default=10)
@@ -236,8 +246,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_len', type=int, default=3)
     parser.add_argument('--target_output', type=str, default='.')
     parser.add_argument('--output_len', type=int)
-    parser.add_argument('--dist_reg', type=int, default=1)
-    parser.add_argument('--perp_reg', type=int, default=0)
+    parser.add_argument('--dist_reg', type=float, default=1)
+    parser.add_argument('--perp_reg', type=float, default=0)
     parser.add_argument('--loss_type', type=str, default='log_prob_loss')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--return_early', action='store_true')

@@ -1,4 +1,15 @@
-from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils
+import subprocess
+import sys
+
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+try:
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils
+except:
+    install('transformers')
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils
+
 import os
 import torch
 utils.logging.set_verbosity_error()
