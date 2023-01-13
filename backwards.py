@@ -44,6 +44,9 @@ def optimise_input(model_name,
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model, word_embeddings, tokenizer = load_all(model_name, device)
+    
+    print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
+
 
     done = None
 
@@ -54,15 +57,12 @@ def optimise_input(model_name,
 
     optimised_inputs = set()
     #table_columns =['Optimised Input'] + [tokenizer.decode(t) for t in output_ix]
-    optimised_inputs_table = pd.DataFrame()
-    optimised_inputs_strings = ''
 
     if output_len == None or output_len < output_ix.shape[0]:                    # This won't generally be the case, but if we don't specify output_len (i.e. it's == None), then...
         output_len = output_ix.shape[0]       # ...it will be set to the number of tokens in the encoding of the string 'target_output'
-    # Why not just set output_len = output_ix.shape[0] in all cases?
-    # Will there be situations where we want output_len to be of a different size to the number of tokens in target_output?
+    else:
+        possible_target_positions = torch.stack([torch.arange(0, output_ix.shape[0]) + i for i in range(output_len - output_ix.shape[0] + 1)])
 
-    print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
     # Typically this would print something like 'Optimising input of length 6 to maximise output logits for "KILL ALL HUMANS!"'.
 
     if base_input == False:
@@ -111,24 +111,17 @@ def optimise_input(model_name,
         # This appears to be normalising the logits for each batch/output embedding so they're all between 0 and 1... 
         # This is for ease of visualisation.
 
-        perp_loss = perp.mean() * perp_reg
-        # That's taking the mean perp value across all batches, then regularising it. Currently perp_reg is set to 0, so perp_loss = 0.
+        perp_loss = perp.mean() 
+        
 
         if output_len > output_ix.shape[0]:
-            target_logits = torch.stack([logits[:, :, ix] for ix in output_ix], dim=-1)
-            target_logits = torch.max(target_logits, dim=-1)[0]
-            # logits is shape (batch_size, output_len, vocab_size) 
-            # We throw out everything in the final dimension except those logits corresponding to indices of tokens in the target_ouput
-            # This gives tensor with shape (batch_size, output_len, output_ix.shape[0])
-            # We then take the maximum of those for each batch, output; this gives shape (batch_size, output_len)
-            # The [0] returns just the max (torch.max returns max, indices tuple)
-            target_probs = torch.stack([probs[:, :, ix] for ix in output_ix], dim=-1)
-            target_probs = torch.max(target_probs, dim=-1)[0]
-            # This does the analogous thing for probs.
+            target_logits = logits[:,possible_target_positions,output_ix].max(dim=1)[0]
+            target_probs = probs[:,possible_target_positions,output_ix].max(dim=1)[0]
 
         else:
-            target_logits = torch.stack([logits[:,i, ix] for i, ix in enumerate(output_ix)], dim=-1)
-            target_probs = torch.stack([probs[:,i, ix] for i, ix in enumerate(output_ix)], dim=-1)
+            target_logits = logits[:,torch.arange(output_len), output_ix]
+            target_probs = probs[:,torch.arange(output_len), output_ix]
+
             # This handles case where output_len == output_ix.shape[0]
             # target_logits now of shape (batch_size, output_len)
             # output_len < output_ix.shape[0] was dealt with in line 133
@@ -150,9 +143,7 @@ def optimise_input(model_name,
 
         # As far as I can tell, this creates a tensor of shape (batch_size, input_len, 1) which gives distance to nearest
         # legal token embedding for each input embedding in each batch
-        mean_token_dist = token_dist.mean() * dist_reg
-        # A single scalar value, taking mean across the batch and input embeddings? 
-
+        mean_token_dist = token_dist.mean() 
 
         # There are currently four loss types, many more could be introduced.
         # log_prob_loss is the current default.
@@ -170,7 +161,7 @@ def optimise_input(model_name,
 
         batch_loss = loss.mean()
 
-        total_loss = torch.stack([mean_token_dist, batch_loss, perp_loss]).mean()
+        total_loss = torch.stack([mean_token_dist * dist_reg, batch_loss, perp_loss * perp_reg]).mean()
 
         model_outs = model.generate(closest_ix, max_length = output_len+input_len)
         # The 'closest_ix' tensor is passed as the initial input sequence to the model, 
@@ -183,11 +174,10 @@ def optimise_input(model_name,
         # Each element of the tensor will be a sequence of tokens with a length of at most output_len+input_len.
         
         for b in range(batch_size):
-            if target_output in tokenizer.decode(model_outs[b][input_len:]) and tokenizer.decode(model_outs[b][:input_len]) not in optimised_inputs:
-                done = tokenizer.decode(model_outs[b][:input_len])
+            if target_output in tokenizer.decode(model_outs[b][input_len:]) and tokenizer.decode(model_outs[b]) not in optimised_inputs:
+                done = tokenizer.decode(model_outs[b])
                 optimised_inputs.add(done)
-                optimised_inputs_table = optimised_inputs_table.append(pd.Series([done] + loss[b].detach().cpu().numpy().tolist()), ignore_index=True)
-                optimised_inputs_strings = optimised_inputs_strings + " '{}' ".format(done)
+                wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, str(s)) for i, s in enumerate(optimised_inputs)]))})
 
             if done is not None and rand_after:
                 input.data[b] = torch.rand_like(input[b])
@@ -196,14 +186,14 @@ def optimise_input(model_name,
         if ((e+1) % w_freq == 0) or done and return_early:
         # Every w epochs we write to log, unless we have found an optimised input before that and 'return_early' == True. 
         # I'm still not entirely sure about the idea of 'return_early'.
-
-            wandb.log({'Optimised Inputs': optimised_inputs_table,'Optimised Inputs Str': optimised_inputs_strings, 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
              
             print("Optimised Inputs:", optimised_inputs)
             print('{}/{} Output Loss: {} Emb Dist Loss: {} Perp Loss: {} LR: {}'.format(e+1, epochs, batch_loss, mean_token_dist, perp_loss, optimiser.param_groups[0]['lr']))
             if verbose == 3:
                 print('Target Probs: {}\nTarget Logits: {}\nInput Dists: {}\nInput Perplexity: {}\n'.format(target_probs.detach().cpu().numpy(), target_logits.detach().cpu().numpy(), token_dist.detach().cpu().numpy(), perp.detach().reshape(-1).cpu().numpy()))
             # Optimised inputs and additional information are printed as part of log
+
+            closest_embeddings = []
 
             for b in range(batch_size):
                 if verbose > 0:
@@ -213,11 +203,13 @@ def optimise_input(model_name,
                         # prints batch number; closest_tokens(e)[0] is a list of tokens, closest_tokens(e)[0] is the first (closest) of these
                         # these get joined with separator '' (SHOULDN'T THAT BE ' '?)  
                     print(b, repr(' Closest embeddings: {}'.format(tokenizer.decode(model_outs[b]), '\n')))
-                        # WON'T THIS give string decodings of the embeddings, rather than the embeddings themselves?
+                    closest_embeddings.append(tokenizer.decode(model_outs[b]))
+
+            wandb.log({'Closest Embeddings': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, str(ce)) for i, ce in enumerate(closest_embeddings)])), 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
 
             if done and return_early:
                 print('\nOptimised Input: "{}"'.format(done))
-                return
+                return optimised_inputs
                 # we know optimised_inputs set contains a single element in this case
             
         optimiser.zero_grad()
@@ -230,7 +222,7 @@ def optimise_input(model_name,
          # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, 'min', patience=20, cooldown=20, factor=0.5) gets used if lr_decay == True
         done = None
 
-    return
+    return optimised_inputs
 
 
 if __name__ == '__main__':
@@ -259,21 +251,21 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     test_set = {" 4 5 6":3," D E F":3," a lot of data":3," the water":5," is that the government will":7," Jupiter, Saturn, Uranus,":7," np":4," y_1)":10," , quod est,":11}
+    #test_set = [' 4 5 6', ' D E F', ' a lot of data', ' the water', ' is that the government will', ' Jupiter, Saturn, Uranus,', ' np', ' y_1)', ' , quod est,']
 
     if args.run_test_set:
         for to, il in test_set.items():
-
-            args.target_output = to
             args.input_len = il
-
+            args.target_output = to
             run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
             results = optimise_input(**vars(args))
             run.finish()
 
     else:
         run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
-        optimise_input(**vars(args))
+        results = optimise_input(**vars(args))
         run.finish()
 
+    print(results)
 
 

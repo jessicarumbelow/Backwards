@@ -1,35 +1,47 @@
 import subprocess
 import sys
+import os
+import torch
 
 def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 try:
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
 except:
     install('transformers')
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
 
-import os
-import torch
 utils.logging.set_verbosity_error()
 
 def load_all(model_name="gpt2", device='cpu',vocab_len=50257):
 
-    cur_dir = os.getcwd()
-    if model_name + '_tokenizer' in cur_dir:
+    cur_dir = os.listdir()
+    
+    if model_name + '_tokenizer' in str(cur_dir):
+        print('Loading tokenizer...')
         tokenizer = torch.load(model_name + '_tokenizer')
     else:
         # Will have to change this line to support other models automatically
-        tokenizer = GPT2Tokenizer.from_pretrained(model_name, padding_side='left')
+        print('Downloading tokenizer...')
+        if 'gpt-j' in model_name:
+            tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
+        else:
+            tokenizer = GPT2Tokenizer.from_pretrained(model_name, padding_side='left')
         torch.save(tokenizer, model_name + '_tokenizer')
     pad_token_id=tokenizer.eos_token_id
 
 
-    if model_name + '_model' in cur_dir:
+    if model_name + '_model' in str(cur_dir):
+        print('Loading model...')
         model = torch.load(model_name + '_model')
     else:
-        model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id, vocab_size=vocab_len).to(device)
+        print('Downloading model...')
+
+        if 'gpt-j' in model_name:
+            model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B").to(device)
+        else:
+            model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id, vocab_size=vocab_len).to(device)
         torch.save(model, model_name + '_model')
     model.eval()
 
@@ -115,7 +127,7 @@ def model_emb(model, inputs_embeds, word_embeddings, output_len):
 
     logits = torch.cat(logits, dim=1)   # this converts logits from a list of tensors to a single tensor, by concatenating all of the tensors in the list
                                         # it will have shape (batch_size, output_len, vocab_size)
-    perp = perplexity(input_logits)     # 'input_logits' was calculated on first pass through loop where only input embeddings were involved
+    perp = perplexity(logits)     # 'input_logits' was calculated on first pass through loop where only input embeddings were involved
     return logits, embs, perp          
     # logits has shape (batch_size, output_len, vocab_size),         CHECK THAT!
     # embs has shape (batch_size, input_len + output_len, embedding_dim)
