@@ -40,7 +40,7 @@ def load_all(model_name="gpt2", device='cpu'):
         if 'gpt-j' in model_name:
             model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B").to(device)
         else:
-            model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id, vocab_size=vocab_len).to(device)
+            model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id).to(device)
         torch.save(model, model_name + '_model')
     model.eval()
 
