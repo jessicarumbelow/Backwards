@@ -10,7 +10,6 @@ import torch
 from matplotlib import pyplot as plt
 from IPython import display
 import numpy as np
-import pandas as pd
 import argparse
 import json
 import os
@@ -43,10 +42,14 @@ def optimise_input(model_name,
     torch.manual_seed(seed)               # sets up PyTorch random number generator
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    wandb.log({'device':str(device)})
+    print('Using {} device.'.format(device))
+
     model, word_embeddings, tokenizer = load_all(model_name, device)
+    model = nn.DataParallel(model)
     
     print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
-
 
     done = None
 
@@ -56,7 +59,7 @@ def optimise_input(model_name,
     # "return_tensors='pt'" ensures that we get a tensor in PyTorch format
 
     optimised_inputs = set()
-    #table_columns =['Optimised Input'] + [tokenizer.decode(t) for t in output_ix]
+    metrics_table = wandb.Table(columns=['Input', 'Output', 'Loss','Perplexity', 'Distance'])
 
     if output_len == None or output_len < output_ix.shape[0]:                    # This won't generally be the case, but if we don't specify output_len (i.e. it's == None), then...
         output_len = output_ix.shape[0]       # ...it will be set to the number of tokens in the encoding of the string 'target_output'
@@ -85,7 +88,6 @@ def optimise_input(model_name,
         # The original code would have pushed everything in a positive direction, hence the use of a tensor full of -0.5's.       
 
 
-    
     input = torch.nn.Parameter(start_input, requires_grad=True)
     # input is not a tensor, it's a Parameter object that wraps a tensor and adds additional functionality. 
     # 'input.data' is used below
@@ -112,7 +114,6 @@ def optimise_input(model_name,
         # This is for ease of visualisation.
 
         perp_loss = perp.mean() 
-        
 
         if output_len > output_ix.shape[0]:
             target_logits = logits[:,possible_target_positions,output_ix].max(dim=1)[0]
@@ -139,7 +140,6 @@ def optimise_input(model_name,
             closest_ix.append(torch.stack(cixs))
 
         token_dist, closest_ix = torch.stack(token_dist).squeeze(-1), torch.stack(closest_ix).squeeze(-1)
-
 
         # As far as I can tell, this creates a tensor of shape (batch_size, input_len, 1) which gives distance to nearest
         # legal token embedding for each input embedding in each batch
@@ -175,13 +175,15 @@ def optimise_input(model_name,
         
         for b in range(batch_size):
             if target_output in tokenizer.decode(model_outs[b][input_len:]) and tokenizer.decode(model_outs[b]) not in optimised_inputs:
+                
                 done = tokenizer.decode(model_outs[b])
                 optimised_inputs.add(done)
-                wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, str(s)) for i, s in enumerate(optimised_inputs)]))})
+                metrics_table.add_data(*[tokenizer.decode(model_outs[b][:input_len]), tokenizer.decode(model_outs[b][input_len:])] + torch.stack([loss.squeeze(-1)[b], perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist())
+                wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(s)) for i, s in enumerate(optimised_inputs)]))})
 
-            if done is not None and rand_after:
-                input.data[b] = torch.rand_like(input[b])
-                # Random re-initialisation (if 'rand_after' set to True)
+                if rand_after:
+                    input.data[b] = torch.rand_like(input[b])
+                    # Random re-initialisation (if 'rand_after' set to True)
         
         if ((e+1) % w_freq == 0) or done and return_early:
         # Every w epochs we write to log, unless we have found an optimised input before that and 'return_early' == True. 
@@ -205,11 +207,11 @@ def optimise_input(model_name,
                     print(b, repr(' Closest embeddings: {}'.format(tokenizer.decode(model_outs[b]), '\n')))
                     closest_embeddings.append(tokenizer.decode(model_outs[b]))
 
-            wandb.log({'Closest Embeddings': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, str(ce)) for i, ce in enumerate(closest_embeddings)])), 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
+            wandb.log({'Closest Embeddings': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(ce)) for i, ce in enumerate(closest_embeddings)])), 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
 
             if done and return_early:
                 print('\nOptimised Input: "{}"'.format(done))
-                return optimised_inputs
+                return {'Metrics':metrics_table}
                 # we know optimised_inputs set contains a single element in this case
             
         optimiser.zero_grad()
@@ -222,7 +224,7 @@ def optimise_input(model_name,
          # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, 'min', patience=20, cooldown=20, factor=0.5) gets used if lr_decay == True
         done = None
 
-    return optimised_inputs
+    return {'Metrics':metrics_table}
 
 
 if __name__ == '__main__':
@@ -259,11 +261,13 @@ if __name__ == '__main__':
             args.target_output = to
             run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
             results = optimise_input(**vars(args))
+            wandb.log(results)
             run.finish()
 
     else:
         run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
         results = optimise_input(**vars(args))
+        wandb.log(results)
         run.finish()
 
     print(results)

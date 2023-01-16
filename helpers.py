@@ -14,8 +14,7 @@ except:
 
 utils.logging.set_verbosity_error()
 
-def load_all(model_name="gpt2", device='cpu',vocab_len=50257):
-
+def load_all(model_name="gpt2", device='cpu'):
     cur_dir = os.listdir()
     
     if model_name + '_tokenizer' in str(cur_dir):
@@ -34,7 +33,7 @@ def load_all(model_name="gpt2", device='cpu',vocab_len=50257):
 
     if model_name + '_model' in str(cur_dir):
         print('Loading model...')
-        model = torch.load(model_name + '_model')
+        model = torch.load(model_name + '_model').to(device)
     else:
         print('Downloading model...')
 
@@ -47,8 +46,12 @@ def load_all(model_name="gpt2", device='cpu',vocab_len=50257):
 
     # 'word_embeddings' tensor gives emeddings for each token in the vocab for this model,
     # has shape (vocab_len, embedding_dimension) which in this case = (50257, 768)
-    word_embeddings = model.transformer.wte.weight.to(device)
-    return model, word_embeddings, tokenizer
+    
+    embeddings = model.transformer.wte.weight.to(device)
+    if model_name + '_embeddings' not in str(cur_dir):
+        torch.save(embeddings, model_name + '_embeddings')
+
+    return model, embeddings, tokenizer
 
 
 
@@ -127,7 +130,7 @@ def model_emb(model, inputs_embeds, word_embeddings, output_len):
 
     logits = torch.cat(logits, dim=1)   # this converts logits from a list of tensors to a single tensor, by concatenating all of the tensors in the list
                                         # it will have shape (batch_size, output_len, vocab_size)
-    perp = perplexity(logits)     # 'input_logits' was calculated on first pass through loop where only input embeddings were involved
+    perp = perplexity(torch.cat([input_logits, logits], dim=1))    
     return logits, embs, perp          
     # logits has shape (batch_size, output_len, vocab_size),         CHECK THAT!
     # embs has shape (batch_size, input_len + output_len, embedding_dim)
