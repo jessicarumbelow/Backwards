@@ -3,14 +3,8 @@ import sys
 import os
 import torch
 
-def install(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-
-try:
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
-except:
-    install('transformers')
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
+!pip install transformers
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
 
 utils.logging.set_verbosity_error()
 
@@ -59,7 +53,7 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
     if seed != -1:
         torch.manual_seed(seed) 
     cluster_size = embeddings.shape[0]//num_clusters
-    print('Cluster size:', cluster_size)
+    #print('Cluster size:', cluster_size)
     centroids = embeddings[torch.randperm(embeddings.shape[0])[:num_clusters]]
 
     movement = 9999
@@ -110,7 +104,7 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
                     sizes = torch.tensor([c.shape[0] for c in clusters])
 
 
-        print(i, 'Mean centroid movement:' ,movement.data.cpu().numpy())
+        #print(i, 'Mean centroid movement:' ,movement.data.cpu().numpy())
         #print(torch.tensor([c.shape[0] for c in clusters]))
     centroids = torch.stack([c.mean(dim=0) for c in clusters])
     return clusters, centroids

@@ -1,11 +1,5 @@
 from helpers import *
-
-try:
-    import wandb
-except:
-    install('wandb')
-    import wandb
-
+!pip install wandb
 import torch
 from matplotlib import pyplot as plt
 from IPython import display
@@ -19,7 +13,10 @@ os.environ["WANDB_SILENT"] = "true"
 
 
 # Here's the key function that optimises for a sequence of input embeddings, given a target_output string:
-def optimise_input(model_name,
+def optimise_input(model,
+                   word_embeddings,
+                   tokenizer,
+                   device,
                    epochs=100, 
                    lr=0.1, 
                    rand_after=False,    # Do we re-initialise inputs tensor with random entries when an optimal input is found?
@@ -36,18 +33,15 @@ def optimise_input(model_name,
                    return_early=True,    # finishes if single optimised input is found
                    verbose=1,            # Controls how much info gets logged.
                    lr_decay=False,       # Use learning rate decay? If so, a scheduler gets invoked.
-                   noise_coeff = 0.01,
+                   run_random=0,
                    **kwargs): 
-            
-    torch.manual_seed(seed)               # sets up PyTorch random number generator
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    torch.manual_seed(args.seed)
 
-    wandb.log({'device':str(device)})
-    print('Using {} device.'.format(device))
-
-    model, word_embeddings, tokenizer = load_all(model_name, device)
-    model = torch.nn.DataParallel(model)
+    if run_random > 0:
+        random_ix = (torch.rand(1)*word_embeddings.shape[0]).int()
+        target_output = tokenizer.decode(random_ix)
+        wandb.config.update({'target_output':target_output}, allow_val_change=True)
     
     print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
 
@@ -80,16 +74,7 @@ def optimise_input(model_name,
     else:
 
         _, centroids = kkmeans(word_embeddings, batch_size, seed=42)
-
-        start_input = centroids.repeat(1, input_len, 1)
-
-        if batch_size > 1:
-            start_input[1:] += (torch.rand_like(start_input[1:]) + torch.full_like(start_input[1:], -0.5)) * noise_coeff
-        #...and if we have more than one element in our batch, we "noise" the rest. 
-        # This was originally done using "*=" (multiplying entries by small random numbers)
-        # We've changed this to "+=" (adding  small random numbers instead of multiplying by them).
-        # The original code would have pushed everything in a positive direction, hence the use of a tensor full of -0.5's.       
-
+        start_input = torch.cat([centroids.unsqueeze(1)]*input_len, dim=1)
 
     input = torch.nn.Parameter(start_input, requires_grad=True)
     # input is not a tensor, it's a Parameter object that wraps a tensor and adds additional functionality. 
@@ -234,7 +219,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--wandb_user', type=str, default='jessicamarycooper')
     parser.add_argument('--model_name', type=str, default='gpt2')
-    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--rand_after', action='store_true')
     parser.add_argument('--w_freq', type=int, default=10)
@@ -250,18 +235,39 @@ if __name__ == '__main__':
     parser.add_argument('--return_early', action='store_true')
     parser.add_argument('--verbose', type=int, default=1)
     parser.add_argument('--lr_decay', action='store_true')
-    parser.add_argument('--noise_coeff', type=float, default=0.01)
     parser.add_argument('--note', type=str, default='')
     parser.add_argument('--run_test_set', action='store_true')
+    parser.add_argument('--run_random', type=int, default=0)
+    
     args = parser.parse_args()
 
     test_set = {" 4 5 6":3," D E F":3," a lot of data":3," the water":5," is that the government will":7," Jupiter, Saturn, Uranus,":7," np":4," y_1)":10," , quod est,":11}
     #test_set = [' 4 5 6', ' D E F', ' a lot of data', ' the water', ' is that the government will', ' Jupiter, Saturn, Uranus,', ' np', ' y_1)', ' , quod est,']
 
+    torch.manual_seed(args.seed)
+
+    args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    print('Using {} device.'.format(args.device))
+
+    args.model, args.word_embeddings, args.tokenizer = load_all(args.model_name, args.device)
+    args.model = torch.nn.DataParallel(args.model)
+
     if args.run_test_set:
         for to, il in test_set.items():
             args.input_len = il
             args.target_output = to
+            run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
+            results = optimise_input(**vars(args))
+            wandb.log(results)
+            run.finish()
+
+    if args.run_random > 0:
+
+        seeds = (torch.rand(args.run_random)*60000).int()
+        for r in range(args.run_random):
+            args.seed=seeds[r]
+            args.target_output = 'RANDOM'
             run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
             results = optimise_input(**vars(args))
             wandb.log(results)
