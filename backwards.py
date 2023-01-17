@@ -1,11 +1,5 @@
 from helpers import *
 
-try:
-    import wandb
-except:
-    install('wandb')
-    import wandb
-
 import torch
 from matplotlib import pyplot as plt
 from IPython import display

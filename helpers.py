@@ -12,6 +12,12 @@ except:
     install('transformers')
     from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
 
+try:
+    import wandb
+except:
+    install('wandb')
+    import wandb
+
 utils.logging.set_verbosity_error()
 
 def load_all(model_name="gpt2", device='cpu'):
