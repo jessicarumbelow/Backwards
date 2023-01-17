@@ -55,6 +55,66 @@ def load_all(model_name="gpt2", device='cpu'):
 
 
 
+def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constrain_size=True):
+    if seed != -1:
+        torch.manual_seed(seed) 
+    cluster_size = embeddings.shape[0]//num_clusters
+    print('Cluster size:', cluster_size)
+    centroids = embeddings[torch.randperm(embeddings.shape[0])[:num_clusters]]
+
+    movement = 9999
+    i = 0
+
+    while movement > threshold and i < max_iter: 
+        i += 1
+
+        # (vocab_len, num_clusters) distances of all token embeddings from each of the centroids.
+        distances = torch.cdist(embeddings, centroids, p=2)
+
+        #(vocab_len, num_cluster), for each token embedding recording the sorted distances to each centroid, and the corresponding sorted centroid indexes.
+        closest_distance, closest_centroid = torch.min(distances, dim=-1)
+        clusters = [embeddings[(closest_centroid==i)] for i in range(num_clusters)]
+
+        new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
+        movement = torch.norm(new_centroids - centroids, dim=-1).mean()
+        centroids = new_centroids
+        
+
+        if constrain_size:
+            sizes, sizes_ix = torch.sort(torch.tensor([c.shape[0] for c in clusters]), descending=True)
+            sorted_clusters = [clusters[ci] for ci in sizes_ix]
+
+            for cluster_ix in range(num_clusters-1):
+                if sizes[cluster_ix] > cluster_size:
+
+                    #get extra embeddings
+                    spare_embeddings = sorted_clusters[cluster_ix][cluster_size:]
+                    #truncate cluster at cluster_size
+                    sorted_clusters[cluster_ix] = sorted_clusters[cluster_ix][:cluster_size]
+
+                    # redistribute extra embeddings
+                    # get other centroids
+                    remaining_centroids = torch.stack([ci.mean(dim=0) for ci in sorted_clusters[cluster_ix+1:]])
+
+                    # calculate distance from extra embeddings to other centroids
+                    spare_distances = torch.cdist(spare_embeddings, remaining_centroids, p=2)
+
+                    #get closest remianing centroid for each extra embedding
+                    closest_spare_dist, closest_spare_centroid = torch.min(spare_distances, dim=-1)
+                    
+                    #update clusters
+                    for ci in range(num_clusters-cluster_ix-1):
+                        sorted_clusters[cluster_ix+ci+1] = torch.cat([sorted_clusters[cluster_ix+ci+1], spare_embeddings[closest_spare_centroid==ci]])
+                    
+                    clusters = sorted_clusters
+                    sizes = torch.tensor([c.shape[0] for c in clusters])
+
+
+        print(i, 'Mean centroid movement:' ,movement.data.cpu().numpy())
+        #print(torch.tensor([c.shape[0] for c in clusters]))
+    centroids = torch.stack([c.mean(dim=0) for c in clusters])
+    return clusters, centroids
+
 
 def normalise(x, min_max=[]):     
 # normalises values of (array or tensor) x according to first (min) and second (max) values in list min_max. 

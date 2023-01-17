@@ -47,7 +47,7 @@ def optimise_input(model_name,
     print('Using {} device.'.format(device))
 
     model, word_embeddings, tokenizer = load_all(model_name, device)
-    model = nn.DataParallel(model)
+    model = torch.nn.DataParallel(model)
     
     print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
 
@@ -78,7 +78,10 @@ def optimise_input(model_name,
         # (we're limiting ourselves to a kind of "hull" defined by the 50527 vocab tokens in the embedding space), 
         # which is a sensible place to look for optimised inputs.
     else:
-        start_input = word_embeddings[output_ix].mean(dim=0).repeat(batch_size, input_len, 1)
+
+        _, centroids = kkmeans(word_embeddings, batch_size, seed=42)
+
+        start_input = centroids.repeat(1, input_len, 1)
 
         if batch_size > 1:
             start_input[1:] += (torch.rand_like(start_input[1:]) + torch.full_like(start_input[1:], -0.5)) * noise_coeff
@@ -163,7 +166,7 @@ def optimise_input(model_name,
 
         total_loss = torch.stack([mean_token_dist * dist_reg, batch_loss, perp_loss * perp_reg]).mean()
 
-        model_outs = model.generate(closest_ix, max_length = output_len+input_len)
+        model_outs = model.module.generate(closest_ix, max_length = output_len+input_len)
         # The 'closest_ix' tensor is passed as the initial input sequence to the model, 
         # and the max_length parameter specifies the maximum length of the total sequence to generate.
         # The output sequence will be terminated either when the end-of-sequence token is generated 
