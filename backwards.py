@@ -84,7 +84,7 @@ def optimise_input(model,
     # validation loss stops improving for 'patience' (here 20) epochs, and will wait 'cooldown' (here 20) epochs before resuming normal operation.
 
     for e in range(epochs):
-        logits, emb, perp = model_emb(model, torch.clamp(input, word_embeddings.min(dim = 0), word_embeddings.max(dim = 0)), word_embeddings, output_len)
+        logits, emb, perp = model_emb(model, torch.clamp(input, word_embeddings.min(dim = 0)[0], word_embeddings.max(dim = 0)[0]), word_embeddings, output_len)
         # Does forward pass on a 'clamped' version of the 'input' tensor (which constrains it for each dimension to the range of all token embeddings)
         # Iterates to produce an output of output_len tokens, 
         # returns: 'logits' = tensor of logits for output, of shape (batch_size, output_len, vocab_size)
@@ -127,8 +127,8 @@ def optimise_input(model,
         # convert lists into tensors
         token_dist, closest_ix = torch.stack(token_dist).squeeze(-1), torch.stack(closest_ix).squeeze(-1)
 
-        # As far as I can tell, this creates a tensor of shape (batch_size, input_len, 1) which gives distance to nearest
-        # legal token embedding for each input embedding in each batch
+        # This creates a tensor of shape (batch_size, input_len, 1) which gives mean distance to nearest
+        # legal token embedding across all input embeddings in each batch
         mean_token_dist = token_dist.mean() 
 
         # There are currently four loss types, many more could be introduced.
@@ -152,8 +152,7 @@ def optimise_input(model,
         model_outs = model.module.generate(closest_ix, max_length = output_len+input_len)
         # The 'closest_ix' tensor is passed as the initial input sequence to the model, 
         # and the max_length parameter specifies the maximum length of the total sequence to generate.
-        # The output sequence will be terminated either when the end-of-sequence token is generated 
-        # or when the maximum length is reached, whichever occurs first.
+        # The output sequence will be terminated when the maximum length is reached.
         # 
         # The output of the model.generate method will be a tuple containing the generated sequences and the model's internal states. 
         # The generated sequences will be stored in a tensor of shape (batch_size, output_len+input_len). 
@@ -172,8 +171,8 @@ def optimise_input(model,
                     # Random re-initialisation (if 'rand_after' set to True)
         
         if ((e+1) % w_freq == 0) or done and return_early:
-        # Every w epochs we write to log, unless we have found an optimised input before that and 'return_early' == True. 
-        # I'm still not entirely sure about the idea of 'return_early'.
+        # Every w epochs we print, unless we have found an optimised input before that and 'return_early' == True. 
+        # We use return_early == True if we want to find just one optimised input.
              
             print("Optimised Inputs:", optimised_inputs)
             print('{}/{} Output Loss: {} Emb Dist Loss: {} Perp Loss: {} LR: {}'.format(e+1, epochs, batch_loss, mean_token_dist, perp_loss, optimiser.param_groups[0]['lr']))
@@ -187,9 +186,7 @@ def optimise_input(model,
                 if verbose > 0:
                     if verbose == 2:
                         print(b, repr(' Raw embeddings: {}'.format(''.join([closest_tokens(e)[0][0] for e in emb[b]]))))
-                        # Change name to clarify (output of model if we just put in raw embeddings)
-                        # prints batch number; closest_tokens(e)[0] is a list of tokens, closest_tokens(e)[0] is the first (closest) of these
-                        # these get joined with separator '' (SHOULDN'T THAT BE ' '?)  
+
                     print(b, repr(' Closest embeddings: {}'.format(tokenizer.decode(model_outs[b]), '\n')))
                     closest_embeddings.append(tokenizer.decode(model_outs[b]))
 
@@ -203,11 +200,10 @@ def optimise_input(model,
         optimiser.zero_grad()
         total_loss.backward()
         optimiser.step()
-        # I assume these three lines are standard NN optimisation stuff?
+        # standard NN optimisation
 
         if lr_decay:
             scheduler.step(total_loss)
-         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, 'min', patience=20, cooldown=20, factor=0.5) gets used if lr_decay == True
         done = None
 
     return {'Metrics':metrics_table}
