@@ -124,17 +124,17 @@ def optimise_input(model,
             token_dist.append(torch.stack(tds))
             closest_ix.append(torch.stack(cixs))
 
-        # convert lists into tensors of shape (batch_size, input_len)
+        # convert lists into tensors
         token_dist, closest_ix = torch.stack(token_dist).squeeze(-1), torch.stack(closest_ix).squeeze(-1)
 
-        # Creates a tensor of shape (batch_size, input_len, 1) which gives distance to nearest
-        # legal token embedding for each input embedding in the batch
+        # As far as I can tell, this creates a tensor of shape (batch_size, input_len, 1) which gives distance to nearest
+        # legal token embedding for each input embedding in each batch
         mean_token_dist = token_dist.mean() 
 
         # There are currently four loss types, many more could be introduced.
         # log_prob_loss is the current default.
         if loss_type == 'logit_loss':
-            loss = 1 - target_logits
+            loss = 1-target_logits
         elif loss_type == 'log_prob_loss':
             loss = -torch.log(target_probs)
         elif loss_type == 'prob_loss':
@@ -145,40 +145,36 @@ def optimise_input(model,
             print(loss_type + 'is not implemented.')
             return 
 
-        # loss is tensor of shape (batch_size,)
-        batch_loss = loss.mean()  # mean across batch
+        batch_loss = loss.mean()
 
         total_loss = torch.stack([mean_token_dist * dist_reg, batch_loss, perp_loss * perp_reg]).mean()
 
         model_outs = model.module.generate(closest_ix, max_length = output_len+input_len)
-        # "module" is used because 'model' has been wrapped in DataParallel
         # The 'closest_ix' tensor is passed as the initial input sequence to the model, 
         # and the max_length parameter specifies the maximum length of the total sequence to generate.
-        # The output sequence will be terminated when the maximum length is reached
-         
+        # The output sequence will be terminated either when the end-of-sequence token is generated 
+        # or when the maximum length is reached, whichever occurs first.
+        # 
         # The output of the model.generate method will be a tuple containing the generated sequences and the model's internal states. 
         # The generated sequences will be stored in a tensor of shape (batch_size, output_len+input_len). 
-        # Each row of the tensor will be a sequence of token indices with a length of output_len+input_len.
+        # Each element of the tensor will be a sequence of tokens with a length of at most output_len+input_len.
         
         for b in range(batch_size):
             if target_output in tokenizer.decode(model_outs[b][input_len:]) and tokenizer.decode(model_outs[b]) not in optimised_inputs:
-            # 'and' clause deals with optimised inputs which have already been found
-
-                done = tokenizer.decode(model_outs[b])  # an optimised input
+                
+                done = tokenizer.decode(model_outs[b])
                 optimised_inputs.add(done)
                 metrics_table.add_data(*[tokenizer.decode(model_outs[b][:input_len]), tokenizer.decode(model_outs[b][input_len:])] + torch.stack([loss.squeeze(-1)[b], perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist())
                 wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(s)) for i, s in enumerate(optimised_inputs)]))})
-                # logging same info twice in different formats for wandb usage
 
                 if rand_after:
-                    input.data[b] = normalise(torch.rand_like(input[b]),[word_embeddings.min(dim=0)[0], word_embeddings.max(dim=0)[0]])
-                    # Random re-initialisation (if 'rand_after' set to True) and normalisation
-
-
+                    input.data[b] = torch.rand_like(input[b])
+                    # Random re-initialisation (if 'rand_after' set to True)
+        
         if ((e+1) % w_freq == 0) or done and return_early:
         # Every w epochs we write to log, unless we have found an optimised input before that and 'return_early' == True. 
-        # return_early == True means we're only interested in first optimised input.
-
+        # I'm still not entirely sure about the idea of 'return_early'.
+             
             print("Optimised Inputs:", optimised_inputs)
             print('{}/{} Output Loss: {} Emb Dist Loss: {} Perp Loss: {} LR: {}'.format(e+1, epochs, batch_loss, mean_token_dist, perp_loss, optimiser.param_groups[0]['lr']))
             if verbose == 3:
@@ -207,11 +203,11 @@ def optimise_input(model,
         optimiser.zero_grad()
         total_loss.backward()
         optimiser.step()
-        # standard NN optimisation commands
-        
+        # I assume these three lines are standard NN optimisation stuff?
+
         if lr_decay:
             scheduler.step(total_loss)
-
+         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, 'min', patience=20, cooldown=20, factor=0.5) gets used if lr_decay == True
         done = None
 
     return {'Metrics':metrics_table}
