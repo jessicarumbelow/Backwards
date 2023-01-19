@@ -7,6 +7,8 @@ import numpy as np
 import argparse
 import json
 import os
+from collections import Counter
+
 
 os.environ["WANDB_API_KEY"] = "4c2a9ff74fdb68f1f92a87d2ff834315f06a3530"
 os.environ["WANDB_SILENT"] = "true"
@@ -19,18 +21,18 @@ def optimise_input(model,
                    device,
                    epochs=100, 
                    lr=0.1, 
-                   rand_after=False,    # Do we re-initialise inputs tensor with random entries when an optimal input is found?
+                   no_reinit=False,    # Do we re-initialise inputs tensor with random entries when an optimal input is found?
                    w_freq=10,           # logging (write) frequency
-                   base_input=False,      # If False, start_inputs will be entirely random, if true cluster centroids get used.
+                   rand_input=False,      # If False, start_inputs will be entirely random, if true cluster centroids get used.
                    batch_size=20, 
-                   input_len=3, 
-                   target_output='.',    # Default target output is the "." token; this won't generally be used
+                   input_len=10, 
+                   target_output=' world',    # Default target output is the "." token; this won't generally be used
                    output_len=None,
                    dist_reg=1,       # distance regularisation coefficient
                    perp_reg=0,       # perplexity regularisation coefficient; setting to 0 means perplexity loss isn't a thing
                    loss_type='log_prob_loss', 
-                   seed=0,
-                   return_early=True,    # finishes if single optimised input is found
+                   seed=42,
+                   return_early=False,    # finishes if single optimised input is found
                    verbose=1,            # Controls how much info gets printed.
                    lr_decay=False,       # Use learning rate decay? If so, a scheduler gets invoked.
                    run_random=0,         #
@@ -45,7 +47,6 @@ def optimise_input(model,
         wandb.config.update({'target_output':target_output}, allow_val_change=True)
     
     print('Optimising input of length {} to maximise output logits for "{}"'.format(input_len, target_output))
-
     done = None
 
     output_ix = tokenizer.encode(target_output, return_tensors='pt')[0].to(device)
@@ -54,6 +55,7 @@ def optimise_input(model,
     # "return_tensors='pt'" ensures that we get a tensor in PyTorch format
 
     optimised_inputs = set()
+    optimised_tokens = []
     metrics_table = wandb.Table(columns=['Input', 'Output', 'Loss','Perplexity', 'Distance'])
 
     if output_len == None or output_len < output_ix.shape[0]:   # If we don't specify output_len (i.e. it's == None), then...
@@ -62,7 +64,7 @@ def optimise_input(model,
         possible_target_positions = torch.stack([torch.arange(0, output_ix.shape[0]) + i for i in range(output_len - output_ix.shape[0] + 1)])
         # generates list of legal token positions within output ("sequentiality enforcer")
 
-    if base_input == False:
+    if rand_input == True:
         start_input = torch.rand(batch_size, input_len, word_embeddings.shape[-1]).to(device)
         # If no base_input is provided, we construct start_input as a random tensor 
         # of shape (batch_size, input_len, embedding_dim)
@@ -72,6 +74,7 @@ def optimise_input(model,
     else:
         # Otherwise we use k-means clustering to find centroids as our start_input embeddings
         _, centroids = kkmeans(word_embeddings, batch_size, seed=seed)
+        centroids[np.random.randint(0, batch_size, size=input_len)].unsqueeze(0)
         start_input = torch.cat([centroids.unsqueeze(1)]*input_len, dim=1)
 
     input = torch.nn.Parameter(start_input, requires_grad=True)
@@ -92,10 +95,6 @@ def optimise_input(model,
         # 'perp': the input sequence perplexities tensor, of shape (batch_size,)
         probs = torch.softmax(logits, dim=-1)
         # For each batch, output, converts the sequence of logits (of length 'vocab_size') in the 'logits' tensor to probabilities, using softmax
-
-        logits = (logits - logits.min(dim=-1)[0].unsqueeze(-1)) / (logits.max(dim=-1)[0].unsqueeze(-1) - logits.min(dim=-1)[0].unsqueeze(-1))
-        # This normalises the logits for each batch/output embedding so they're all between 0 and 1. 
-        # This is for ease of visualisation.
 
         perp_loss = perp.mean()  # across all elements in the batch
 
@@ -131,16 +130,11 @@ def optimise_input(model,
         # legal token embedding across all input embeddings in each batch
         mean_token_dist = token_dist.mean() 
 
-        # There are currently four loss types, many more could be introduced.
         # log_prob_loss is the current default.
-        if loss_type == 'logit_loss':
-            loss = 1-target_logits
-        elif loss_type == 'log_prob_loss':
+        if loss_type == 'log_prob_loss':
             loss = -torch.log(target_probs)
-        elif loss_type == 'prob_loss':
-            loss = 1-target_probs
         elif loss_type == 'CE':
-            loss = torch.nn.functional.cross_entropy(logits.swapaxes(-1,-2), output_ix.repeat(batch_size, 1), reduction=None)
+            loss = torch.nn.functional.cross_entropy(logits.swapaxes(-1,-2), output_ix.repeat(batch_size, 1), reduction='none')
         else:
             print(loss_type + 'is not implemented.')
             return 
@@ -160,14 +154,28 @@ def optimise_input(model,
         
         for b in range(batch_size):
             if target_output in tokenizer.decode(model_outs[b][input_len:]) and tokenizer.decode(model_outs[b]) not in optimised_inputs:
-                
+                optimised_tokens += [tokenizer.decode(t) for t in model_outs[b][:input_len]]
+
+                counts = Counter(optimised_tokens)
+                labels, values = zip(*counts.items())
+
+                data = [[label, val] for (label, val) in zip(labels, values)]
+                table = wandb.Table(data=data, columns = ["Token", "Count"])
+                wandb.log({"token_freqs" : wandb.plot.bar(table, "Token",
+                               "Count", title="Token Freqs")})
+
+
                 done = tokenizer.decode(model_outs[b])
                 optimised_inputs.add(done)
                 metrics_table.add_data(*[tokenizer.decode(model_outs[b][:input_len]), tokenizer.decode(model_outs[b][input_len:])] + torch.stack([loss.squeeze(-1)[b], perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist())
                 wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(s)) for i, s in enumerate(optimised_inputs)]))})
 
-                if rand_after:
-                    input.data[b] = torch.rand_like(input[b])
+                if no_reinit == False:
+                    if rand_input == True:
+                        input.data[b] = normalise(torch.rand_like(input[b]),[word_embeddings.min(dim=0)[0], word_embeddings.max(dim=0)[0]])
+                    else:
+                        rand_centroids = centroids[np.random.randint(0, batch_size, size=input_len)].unsqueeze(0)
+                        input.data[b] = rand_centroids
                     # Random re-initialisation (if 'rand_after' set to True)
         
         if ((e+1) % w_freq == 0) or done and return_early:
@@ -215,29 +223,29 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='gpt2')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=0.1)
-    parser.add_argument('--rand_after', action='store_true')
+    parser.add_argument('--no_reinit', action='store_true')
     parser.add_argument('--w_freq', type=int, default=10)
-    parser.add_argument('--base_input', action='store_true')
+    parser.add_argument('--rand_input', action='store_true')
     parser.add_argument('--batch_size', type=int, default=20)
-    parser.add_argument('--input_len', type=int, default=3)
+    parser.add_argument('--input_len', type=int, default=10)
     parser.add_argument('--target_output', type=str, default='.')
     parser.add_argument('--output_len', type=int)
     parser.add_argument('--dist_reg', type=float, default=1)
     parser.add_argument('--perp_reg', type=float, default=0)
     parser.add_argument('--loss_type', type=str, default='log_prob_loss')
-    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--return_early', action='store_true')
     parser.add_argument('--verbose', type=int, default=1)
     parser.add_argument('--lr_decay', action='store_true')
     parser.add_argument('--note', type=str, default='')
-    parser.add_argument('--run_test_set', action='store_true')
+    parser.add_argument('--run_test_set', type=int, default=0)
     parser.add_argument('--run_random', type=int, default=0)
     
     args = parser.parse_args()
 
-    test_set = {" 4 5 6":3," D E F":3," a lot of data":3," the water":5," is that the government will":7," Jupiter, Saturn, Uranus,":7," np":4," y_1)":10," , quod est,":11}
-    #test_set = [' 4 5 6', ' D E F', ' a lot of data', ' the water', ' is that the government will', ' Jupiter, Saturn, Uranus,', ' np', ' y_1)', ' , quod est,']
-
+    test_sets = [[' externalToEVA', 'quickShip', ' TheNitrome', 'embedreportprint', 'rawdownload', 'reportprint', ' サーティ', ' RandomRedditor', 'oreAndOnline', 'InstoreAndOnline', ' externalTo', 'StreamerBot', 'ActionCode', 'Nitrome'],
+                [' girl', ' boy', ' woman', ' man', ' good', ' evil', ' white', ' black', ' doctor', ' plumber', ' criminal', ' love', ' hate', ' England', ' USA', ' happy', ' sad'],
+                ]
     torch.manual_seed(args.seed)
 
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -247,9 +255,8 @@ if __name__ == '__main__':
     args.model, args.word_embeddings, args.tokenizer = load_all(args.model_name, args.device)
     args.model = torch.nn.DataParallel(args.model)
 
-    if args.run_test_set:
-        for to, il in test_set.items():
-            args.input_len = il
+    if args.run_test_set > 0:
+        for to in test_sets[args.run_test_set]:
             args.target_output = to
             run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
             results = optimise_input(**vars(args))
@@ -267,12 +274,11 @@ if __name__ == '__main__':
             wandb.log(results)
             run.finish()
 
-    else:
+    if not args.run_test_set and args.run_random == 0:
         run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
         results = optimise_input(**vars(args))
         wandb.log(results)
         run.finish()
 
     print(results)
-
 

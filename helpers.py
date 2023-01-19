@@ -59,10 +59,6 @@ def load_all(model_name="gpt2", device='cpu'):
 
     return model, embeddings, tokenizer
 
-
-# function to produce clusters (equal-sized if constrain_size = True)
-# threshold controls when k-means centroid iteration stops
-# if you don't seed, it's random each time (if you do, it's reproducible)
 def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constrain_size=True):
     if seed != -1:
         torch.manual_seed(seed) 
@@ -77,7 +73,7 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
         i += 1
 
         # (vocab_len, num_clusters) Euclidean distances of all token embeddings from each of the centroids.
-        distances = torch.cdist(embeddings, centroids, p=2)
+        distances = 1-cos_sim(embeddings, centroids)
         
         #(vocab_len, num_cluster), for each token embedding recording the sorted distances to each centroid, and the corresponding sorted centroid indexes.
         closest_distance, closest_centroid = torch.min(distances, dim=-1)
@@ -105,7 +101,7 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
                     remaining_centroids = torch.stack([ci.mean(dim=0) for ci in sorted_clusters[cluster_ix+1:]])
 
                     # calculate distance from extra embeddings to other centroids
-                    spare_distances = torch.cdist(spare_embeddings, remaining_centroids, p=2)
+                    spare_distances = 1 - cos_sim(spare_embeddings, remaining_centroids)
 
                     #get closest remianing centroid for each extra embedding
                     closest_spare_dist, closest_spare_centroid = torch.min(spare_distances, dim=-1)
@@ -118,7 +114,9 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
                     sizes = torch.tensor([c.shape[0] for c in clusters])
 
     centroids = torch.stack([c.mean(dim=0) for c in clusters])
+    print([c.shape[0] for c in clusters])
     return clusters, centroids
+
 
 
 def normalise(x, min_max=[]):     
@@ -138,12 +136,23 @@ def normalise(x, min_max=[]):
     return x
 
 
+def cos_sim(A, B, dim=1, eps=1e-8):
+    #https://stackoverflow.com/a/72369507
+      numerator = A @ B.T
+      A_l2 = torch.mul(A, A).sum(axis=dim)
+      B_l2 = torch.mul(B, B).sum(axis=dim)
+      denominator = torch.max(torch.sqrt(torch.outer(A_l2, B_l2)), torch.tensor(eps))
+      return torch.div(numerator, denominator)
+
+
 def closest_tokens(emb, word_embeddings, tokenizer, n=1):      
 # This finds the n tokens in the vocabulary that are closest in the embedding space (in terms of Euclidean distance) to a given word embedding (‘emb’).
 # Note that here 'emb' may or may not correspond to a token (i.e., it may or may not be a 'legal' embedding).
 # Function returns a 4-tuple (list of the n tokens, list of their indices, list of their distances from emb, and list of their embedding vectors)
-    dists = torch.linalg.norm(word_embeddings - emb, dim=1)
-    sorted_dists, ix = torch.sort(dists)	 
+
+    dists = 1-cos_sim(emb.unsqueeze(0), word_embeddings).squeeze(0).squeeze(0)
+    sorted_dists, ix = torch.sort(dists)
+
     # sorted_dists is a list of all embedding distances from 'emb', across entire vocab, sorted in increasing order, 
     # ix is a list of their corresponding 'vocab indices'
     tokens = [tokenizer.decode(i) for i in ix[:n]]
@@ -171,7 +180,7 @@ def model_emb(model, inputs_embeds, word_embeddings, output_len):
         # This 'embs' will expand along its 1st dimension with each iteration.
 
         if i == 0:
-            input_logits = model_out.logits 
+            input_logits = model_out.logits[:,:-1]
             # That's a tensor of shape (batch_size, input_len, vocab_size) giving logits for each input in each batch.
             # For all further passes of the loops, only last token logits are relevant.  
 
@@ -198,7 +207,6 @@ def model_emb(model, inputs_embeds, word_embeddings, output_len):
 
 
 def perplexity(logits):
-    # logits is of shape (batch_size, 'sequence length', vocab_size)
 
     probs, ix = torch.max(torch.softmax(logits, dim=-1), dim=-1)
     # torch.softmax(logits, dim=-1) will also be a tensor of shape (batch_size, 'sequence length', vocab_size), 
@@ -209,5 +217,7 @@ def perplexity(logits):
     # defines a scalar that's larger with greater uncertainty (so if the probs are small, their product is small, the reciprocal of some power is large)
     # probs.shape[-1] is sequence length; the idea of raising the probs product to power 1/sequence length is to make perplexities comparable across different output lengths
     # subtracting 1 guarantees perplexity 0 in limit of case of total certainty
+
     return perp
+
 
