@@ -39,6 +39,7 @@ def optimise_input(model,
                    distance_type='cosine',
                    equal_clusters=False,
                    penalise_repetition=False,
+                   optimiser='Adam',
                    **kwargs): 
 
     # Picks a single token at random from vocabulary for target_output
@@ -66,7 +67,7 @@ def optimise_input(model,
         # generates list of legal token positions within output ("sequentiality enforcer")
 
     if rand_input == True:
-        start_input = torch.rand(batch_size, input_len, word_embeddings.shape[-1]).to(device)
+        start_input = torch.rand(batch_size, input_len, word_embeddings.shape[-1], dtype=torch.float16).to(device)
         # If no base_input is provided, we construct start_input as a random tensor 
         # of shape (batch_size, input_len, embedding_dim)
         start_input = normalise(start_input,[word_embeddings.min(dim=0)[0], word_embeddings.max(dim=0)[0]])
@@ -81,7 +82,12 @@ def optimise_input(model,
     input = torch.nn.Parameter(start_input, requires_grad=True)
     # input is Parameter object that wraps a tensor and adds additional functionality. 
     
-    optimiser = torch.optim.Adam([input], lr=lr)
+    if optimiser == 'Adam':
+        optimiser = torch.optim.Adam([input], lr=lr, eps=1e-4)
+    elif optimiser == 'SGD':
+        optimiser = torch.optim.SGD([input], lr=lr)
+    else:
+        print('Unsupported optimiser: ', optimiser)
     # standard optimiser; note that it generally operates on a list of tensors, so we're giving it a list of one tensor; standard learning rate
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimiser, 'min', patience=20, cooldown=20, factor=0.5)
     # this is used when loss hasn't improved for 20 timesteps; this scheduler will reduce the lr by a 'factor' of 0.5 when the 
@@ -137,6 +143,9 @@ def optimise_input(model,
         if loss_type == 'log_prob_loss':
             loss = -torch.log(target_probs)
         elif loss_type == 'CE':
+            if output_len > 1:
+                print('CE not supported with output length > 1.')
+                return
             loss = torch.nn.functional.cross_entropy(logits.swapaxes(-1,-2), output_ix.repeat(batch_size, 1), reduction='none')
         else:
             print(loss_type + 'is not implemented.')
@@ -251,6 +260,7 @@ if __name__ == '__main__':
     parser.add_argument('--run_test_set', type=int, default=-1)
     parser.add_argument('--run_random', type=int, default=0)
     parser.add_argument('--distance_type', type=str, default='cosine')
+    parser.add_argument('--optimiser', type=str, default='Adam')
     parser.add_argument('--equal_clusters', action='store_true')
     parser.add_argument('--penalise_repetition', action='store_true')
 

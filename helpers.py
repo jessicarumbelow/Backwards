@@ -21,12 +21,16 @@ except:
 
 utils.logging.set_verbosity_error()
 
-def load_all(model_name="gpt2", device='cpu'):
-    cur_dir = os.listdir()
+def load_all(model_name="gpt2", device='cpu', save_dir=''):
+    print(save_dir)
+    if save_dir == '':
+        cur_dir = os.listdir()
+    else:
+        cur_dir = os.listdir(save_dir)
     
     if model_name + '_tokenizer' in cur_dir:
         print('Loading tokenizer...')
-        tokenizer = torch.load(model_name + '_tokenizer')
+        tokenizer = torch.load(save_dir + model_name + '_tokenizer')
     else:
         # Will have to change this line to support other models automatically
         print('Downloading tokenizer...')
@@ -34,13 +38,12 @@ def load_all(model_name="gpt2", device='cpu'):
             tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
         else:
             tokenizer = GPT2Tokenizer.from_pretrained(model_name, padding_side='left')
-        torch.save(tokenizer, model_name + '_tokenizer')
+        torch.save(tokenizer, save_dir + model_name + '_tokenizer')
     pad_token_id=tokenizer.eos_token_id
-
 
     if model_name + '_model' in cur_dir:
         print('Loading model...')
-        model = torch.load(model_name + '_model').to(device)
+        model = torch.load(save_dir + model_name + '_model').to(device)
     else:
         print('Downloading model...')
 
@@ -48,20 +51,64 @@ def load_all(model_name="gpt2", device='cpu'):
             model = GPTJForCausalLM.from_pretrained("EleutherAI/gpt-j-6B", revision="float16", torch_dtype=torch.float16, low_cpu_mem_usage=True).to(device)
         else:
             model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id).to(device)
-        torch.save(model, model_name + '_model')
+        torch.save(model, save_dir + model_name + '_model')
     model.eval()
 
     # 'embeddings' tensor gives emeddings for each token in the vocab for this model,
     # has shape (vocab length, embedding dimension) 
     
     embeddings = model.transformer.wte.weight.to(device)
-    if model_name + '_embeddings' not in str(cur_dir):
-        torch.save(embeddings, model_name + '_embeddings')
+    if model_name + '_embeddings' not in cur_dir:
+        torch.save(embeddings, save_dir + model_name + '_embeddings')
 
     return model, embeddings, tokenizer
 
-def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=-1, distance_type='cosine', overwrite=False, save_dir='', equal_clusters=False):
+def cluster_info(clusters, tokenizer, get_centroid_tokens=True, get_vocab_tokens=False):
+    for i, c in enumerate(clusters):
+        print('Cluster', i, 'contains', c.shape[0], 'embeddings.\n')
+        #Now we're going to find the nearest 20 tokens in the cluster (give them + indices) and list them all with distances
+        #If the cluster size k < 20, we'll just use the nearest k tokens
+        if get_centroid_tokens:
+            k = c.shape[0]
+            if k > 20:
+                k = 20
+            print('The nearest', k, 'tokens in cluster', i, 'to the cluster centroid:')
+            centroid = c.mean(dim=0).unsqueeze(0) # adding a dimension
+            cluster_distances = 1-cos_sim(c, centroid).squeeze(-1)
+
+
+            top_k, top_k_indices = torch.topk(cluster_distances, k, largest=False, sorted=True)
+            for j in range(k):
+                embedding = clusters[i][top_k_indices[j].item()]
+                distances = 1-cos_sim(embeddings,embedding.unsqueeze(0)).squeeze(-1)
+
+                index = torch.argmin(distances)
+                print("{:<7}{:35}{:<8}{:<8}{:<11}{:<15}".format('     Token:', repr(tokenizer.decode(index)), 'Index:', index.item(), 'Distance:', top_k[j].item()))
+            if i < len(clusters) - 1:
+                print('')
+
+        if get_vocab_tokens:
+
+            #Then we're going to find the nearest k tokens in the entire vocab (give them + indices)  and list them all with distances
+            print('The nearest', k, 'tokens in the entire vocabulary to the cluster centroid:')
+            vocab_distances = 1-cos_sim(embeddings,centroid).squeeze(-1)
+
+            top_k, top_k_indices = torch.topk(vocab_distances, k, largest=False, sorted=True)
+            for j in range(k):
+                embedding = embeddings[top_k_indices[j].item()]
+                distances = 1-cos_sim(embeddings,embedding.unsqueeze(0)).squeeze(-1)
+
+                index = torch.argmin(distances)
+                print("{:<7}{:35}{:<8}{:<8}{:<11}{:<15}".format('     Token:', repr(tokenizer.decode(index)), 'Index:', index.item(), 'Distance:', top_k[j].item()))
+            if i < len(clusters) - 1:
+                print('\n')
+
+    return
+
+
+def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=0, distance_type='cosine', overwrite=False, save_dir='', equal_clusters=False):
      
+    embeddings = embeddings.detach()
     def dist(embeddings, centroids):
         if distance_type == 'cosine':
             distances = 1-cos_sim(embeddings, centroids)
@@ -70,8 +117,8 @@ def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=-1, d
         return distances
 
         
-    centroid_fname = str(embeddings.shape) + '_' + str(num_clusters) + '_' + str(seed) + '_e' + str(equal_clusters) + '_' + distance_type + '_centroids'
-    cluster_fname = str(embeddings.shape) + '_' + str(num_clusters) + '_' + str(seed) + '_e' + str(equal_clusters) + '_' + distance_type + '_cluster'
+    centroid_fname = str(embeddings.shape[0]) + '_' + str(embeddings.shape[1]) + '_' + str(num_clusters) + '_' + str(equal_clusters) + '_' + distance_type + '_'+ str(seed) +'_centroids'
+    cluster_fname = str(embeddings.shape[0]) + '_' + str(embeddings.shape[1]) + '_' + str(num_clusters) + distance_type + '_'+ str(seed) +'_cluster'
 
     if not overwrite:
         cur_dir = os.listdir()
@@ -118,7 +165,7 @@ def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=-1, d
         
         new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
         movement = torch.abs(new_centroids - centroids).mean()
-        print(i, movement)
+        print(movement)
         centroids = new_centroids
 
     centroids = torch.stack([c.mean(dim=0) for c in clusters])
@@ -126,7 +173,6 @@ def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=-1, d
     torch.save(clusters, save_dir + cluster_fname)
     torch.save(centroids, save_dir + centroid_fname)
     return clusters, centroids
-
 
 
 def normalise(x, min_max=[]):     
