@@ -28,7 +28,7 @@ def optimise_input(model,
                    input_len=10, 
                    target_output=' world',    # Default target output is the "." token; this won't generally be used
                    output_len=None,
-                   dist_reg=1,       # distance regularisation coefficient
+                   dist_reg=0.1,       # distance regularisation coefficient
                    perp_reg=0,       # perplexity regularisation coefficient; setting to 0 means perplexity loss isn't a thing
                    loss_type='log_prob_loss', 
                    seed=0,
@@ -57,7 +57,7 @@ def optimise_input(model,
 
     optimised_inputs = set()
     optimised_tokens = []
-    metrics_table = wandb.Table(columns=['Input', 'Output', 'Loss','Perplexity', 'Distance'])
+    metrics_table = wandb.Table(columns=['Input', 'Output', 'Loss','Perplexity', 'Distance', 'Probs'])
 
     if output_len == None or output_len < output_ix.shape[0]:   # If we don't specify output_len (i.e. it's == None), then...
         output_len = output_ix.shape[0]       # ...it will be set to the number of tokens in the encoding of the string 'target_output'
@@ -74,8 +74,9 @@ def optimise_input(model,
         # This keeps each dimension of the starting embeddings within the range of the legal token embeddings. 
     else:
         # Otherwise we use k-means clustering to find centroids as our start_input embeddings
-        _, centroids = kkmeans(word_embeddings, batch_size, seed=seed, distance_type=distance_type, equal_clusters=equal_clusters)
-        start_input = torch.cat([centroids.unsqueeze(1)]*input_len, dim=1)
+        num_clusters = batch_size*input_len
+        _, centroids = kkmeans(word_embeddings, num_clusters, seed=seed, distance_type=distance_type, equal_clusters=equal_clusters)
+        start_input = centroids.reshape(batch_size, input_len, -1)
 
     input = torch.nn.Parameter(start_input, requires_grad=True)
     # input is Parameter object that wraps a tensor and adds additional functionality. 
@@ -176,7 +177,7 @@ def optimise_input(model,
 
                 done = tokenizer.decode(model_outs[b])
                 optimised_inputs.add(done)
-                metrics_table.add_data(*[tokenizer.decode(model_outs[b][:input_len]), tokenizer.decode(model_outs[b][input_len:])] + torch.stack([loss.squeeze(-1)[b], perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist())
+                metrics_table.add_data(*[tokenizer.decode(model_outs[b][:input_len]), tokenizer.decode(model_outs[b][input_len:])] + torch.stack([loss.squeeze(-1)[b], perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist() + target_probs[b].tolist())
                 wandb.log({'Optimised Inputs': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(s)) for i, s in enumerate(optimised_inputs)]))})
 
                 if no_reinit == False:
@@ -239,7 +240,7 @@ if __name__ == '__main__':
     parser.add_argument('--input_len', type=int, default=10)
     parser.add_argument('--target_output', type=str, default=' world')
     parser.add_argument('--output_len', type=int)
-    parser.add_argument('--dist_reg', type=float, default=1)
+    parser.add_argument('--dist_reg', type=float, default=0.1)
     parser.add_argument('--perp_reg', type=float, default=0)
     parser.add_argument('--loss_type', type=str, default='log_prob_loss')
     parser.add_argument('--seed', type=int, default=0)
@@ -247,7 +248,7 @@ if __name__ == '__main__':
     parser.add_argument('--verbose', type=int, default=1)
     parser.add_argument('--lr_decay', action='store_true')
     parser.add_argument('--note', type=str, default='')
-    parser.add_argument('--run_test_set', type=int, default=0)
+    parser.add_argument('--run_test_set', type=int, default=-1)
     parser.add_argument('--run_random', type=int, default=0)
     parser.add_argument('--distance_type', type=str, default='cosine')
     parser.add_argument('--equal_clusters', action='store_true')
@@ -270,7 +271,7 @@ if __name__ == '__main__':
 
     args.model, args.word_embeddings, args.tokenizer = load_all(args.model_name, args.device)
 
-    if args.run_test_set > 0:
+    if args.run_test_set > -1:
         for to in test_sets[args.run_test_set]:
             args.target_output = to
             run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
@@ -289,10 +290,9 @@ if __name__ == '__main__':
             wandb.log(results)
             run.finish()
 
-    if not args.run_test_set and args.run_random == 0:
+    if args.run_test_set == -1 and args.run_random == 0:
         run = wandb.init(config=args, project='backwards', entity=args.wandb_user, reinit=True)
         results = optimise_input(**vars(args))
         wandb.log(results)
         run.finish()
 
-    print(results)
