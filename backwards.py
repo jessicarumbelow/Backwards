@@ -75,7 +75,7 @@ def optimise_input(model,
     else:
         # Otherwise we use k-means clustering to find centroids as our start_input embeddings
         num_clusters = batch_size*input_len
-        _, centroids = kkmeans(word_embeddings, num_clusters, seed=seed, distance_type=distance_type, equal_clusters=equal_clusters)
+        _, centroids = kkmeans(word_embeddings.detach(), num_clusters, seed=seed, distance_type=distance_type, equal_clusters=equal_clusters)
         start_input = centroids.reshape(batch_size, input_len, -1)
 
     input = torch.nn.Parameter(start_input, requires_grad=True)

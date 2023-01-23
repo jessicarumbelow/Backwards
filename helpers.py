@@ -7,10 +7,11 @@ def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 try:
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, GPTJForCausalLM
 except:
     install('transformers')
-    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, AutoModelForCausalLM
+    install('accelerate')
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, utils, AutoTokenizer, GPTJForCausalLM
 
 try:
     import wandb
@@ -44,7 +45,7 @@ def load_all(model_name="gpt2", device='cpu'):
         print('Downloading model...')
 
         if 'gpt-j' in model_name:
-            model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B").to(device)
+            model = GPTJForCausalLM.from_pretrained("EleutherAI/gpt-j-6B", revision="float16", torch_dtype=torch.float16, low_cpu_mem_usage=True).to(device)
         else:
             model = GPT2LMHeadModel.from_pretrained(model_name, pad_token_id=tokenizer.eos_token_id).to(device)
         torch.save(model, model_name + '_model')
@@ -59,7 +60,7 @@ def load_all(model_name="gpt2", device='cpu'):
 
     return model, embeddings, tokenizer
 
-def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, distance_type='cosine', overwrite=False, save_dir='', equal_clusters=False):
+def kkmeans(embeddings, num_clusters, threshold=0.0001, max_iter=300, seed=-1, distance_type='cosine', overwrite=False, save_dir='', equal_clusters=False):
      
     def dist(embeddings, centroids):
         if distance_type == 'cosine':
@@ -117,7 +118,7 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, distan
         
         new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
         movement = torch.abs(new_centroids - centroids).mean()
-        print(movement)
+        print(i, movement)
         centroids = new_centroids
 
     centroids = torch.stack([c.mean(dim=0) for c in clusters])
