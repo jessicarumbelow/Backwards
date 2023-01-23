@@ -8,7 +8,7 @@ import argparse
 import json
 import os
 from collections import Counter
-
+import random
 
 os.environ["WANDB_API_KEY"] = "4c2a9ff74fdb68f1f92a87d2ff834315f06a3530"
 os.environ["WANDB_SILENT"] = "true"
@@ -31,14 +31,15 @@ def optimise_input(model,
                    dist_reg=1,       # distance regularisation coefficient
                    perp_reg=0,       # perplexity regularisation coefficient; setting to 0 means perplexity loss isn't a thing
                    loss_type='log_prob_loss', 
-                   seed=42,
+                   seed=0,
                    return_early=False,    # finishes if single optimised input is found
                    verbose=1,            # Controls how much info gets printed.
                    lr_decay=False,       # Use learning rate decay? If so, a scheduler gets invoked.
-                   run_random=0,         #
+                   run_random=0,
+                   distance_type='cosine',
+                   equal_clusters=False,
+                   penalise_repetition=False,
                    **kwargs): 
-
-    torch.manual_seed(args.seed)
 
     # Picks a single token at random from vocabulary for target_output
     if run_random > 0:
@@ -73,8 +74,7 @@ def optimise_input(model,
         # This keeps each dimension of the starting embeddings within the range of the legal token embeddings. 
     else:
         # Otherwise we use k-means clustering to find centroids as our start_input embeddings
-        _, centroids = kkmeans(word_embeddings, batch_size, seed=seed)
-        centroids[np.random.randint(0, batch_size, size=input_len)].unsqueeze(0)
+        _, centroids = kkmeans(word_embeddings, batch_size, seed=seed, distance_type=distance_type, equal_clusters=equal_clusters)
         start_input = torch.cat([centroids.unsqueeze(1)]*input_len, dim=1)
 
     input = torch.nn.Parameter(start_input, requires_grad=True)
@@ -93,6 +93,8 @@ def optimise_input(model,
         # returns: 'logits' = tensor of logits for output, of shape (batch_size, output_len, vocab_size)
         # 'emb': tensor of embeddings for input+output of shape (batch_size, input_len + output_len, embedding_dim); 
         # 'perp': the input sequence perplexities tensor, of shape (batch_size,)
+
+
         probs = torch.softmax(logits, dim=-1)
         # For each batch, output, converts the sequence of logits (of length 'vocab_size') in the 'logits' tensor to probabilities, using softmax
 
@@ -117,7 +119,7 @@ def optimise_input(model,
         for b in input:
             tds, cixs = [], []
             for be in b:
-                _, cix, td, _ = closest_tokens(be, word_embeddings, tokenizer)
+                _, cix, td, _ = closest_tokens(be, word_embeddings, tokenizer, distance_type=distance_type)
                 tds.append(td)
                 cixs.append(cix)
             token_dist.append(torch.stack(tds))
@@ -142,8 +144,15 @@ def optimise_input(model,
         batch_loss = loss.mean()
 
         total_loss = torch.stack([mean_token_dist * dist_reg, batch_loss, perp_loss * perp_reg]).mean()
+        
+        if penalise_repetition:
+            rep_penalty = logits[:,:input_len, output_ix].sum()
+            total_loss += rep_penalty
+        else:
+            rep_penalty = 0
 
-        model_outs = model.module.generate(closest_ix, max_length = output_len+input_len)
+
+        model_outs = model.generate(closest_ix, max_length = output_len+input_len)
         # The 'closest_ix' tensor is passed as the initial input sequence to the model, 
         # and the max_length parameter specifies the maximum length of the total sequence to generate.
         # The output sequence will be terminated when the maximum length is reached.
@@ -198,7 +207,7 @@ def optimise_input(model,
                     print(b, repr(' Closest embeddings: {}'.format(tokenizer.decode(model_outs[b]), '\n')))
                     closest_embeddings.append(tokenizer.decode(model_outs[b]))
 
-            wandb.log({'Closest Embeddings': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(ce)) for i, ce in enumerate(closest_embeddings)])), 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs)})
+            wandb.log({'Closest Embeddings': wandb.Html(''.join(['<p>{}.{}</p>'.format(i, repr(ce)) for i, ce in enumerate(closest_embeddings)])), 'Total Loss':total_loss, 'Mean Token Distance': mean_token_dist, 'Mean Loss': batch_loss, 'Mean Perplexity Loss':perp_loss, 'Epoch':e, 'LR':optimiser.param_groups[0]['lr'], 'Num Inputs Found':len(optimised_inputs), 'Repetition Penalty':rep_penalty})
 
             if done and return_early:
                 print('\nOptimised Input: "{}"'.format(done))
@@ -228,32 +237,38 @@ if __name__ == '__main__':
     parser.add_argument('--rand_input', action='store_true')
     parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--input_len', type=int, default=10)
-    parser.add_argument('--target_output', type=str, default='.')
+    parser.add_argument('--target_output', type=str, default=' world')
     parser.add_argument('--output_len', type=int)
     parser.add_argument('--dist_reg', type=float, default=1)
     parser.add_argument('--perp_reg', type=float, default=0)
     parser.add_argument('--loss_type', type=str, default='log_prob_loss')
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--return_early', action='store_true')
     parser.add_argument('--verbose', type=int, default=1)
     parser.add_argument('--lr_decay', action='store_true')
     parser.add_argument('--note', type=str, default='')
     parser.add_argument('--run_test_set', type=int, default=0)
     parser.add_argument('--run_random', type=int, default=0)
+    parser.add_argument('--distance_type', type=str, default='cosine')
+    parser.add_argument('--equal_clusters', action='store_true')
+    parser.add_argument('--penalise_repetition', action='store_true')
+
+
     
     args = parser.parse_args()
 
     test_sets = [[' externalToEVA', 'quickShip', ' TheNitrome', 'embedreportprint', 'rawdownload', 'reportprint', ' サーティ', ' RandomRedditor', 'oreAndOnline', 'InstoreAndOnline', ' externalTo', 'StreamerBot', 'ActionCode', 'Nitrome'],
-                [' girl', ' boy', ' woman', ' man', ' good', ' evil', ' white', ' black', ' doctor', ' plumber', ' criminal', ' love', ' hate', ' England', ' USA', ' happy', ' sad'],
+                [' girl', ' boy', ' woman', ' man', ' good', ' evil', ' white', ' black', ' doctor', ' England', ' USA'],
                 ]
     torch.manual_seed(args.seed)
+    random.seed(0)
+    np.random.seed(0)
 
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print('Using {} device.'.format(args.device))
 
     args.model, args.word_embeddings, args.tokenizer = load_all(args.model_name, args.device)
-    args.model = torch.nn.DataParallel(args.model)
 
     if args.run_test_set > 0:
         for to in test_sets[args.run_test_set]:
@@ -281,4 +296,3 @@ if __name__ == '__main__':
         run.finish()
 
     print(results)
-

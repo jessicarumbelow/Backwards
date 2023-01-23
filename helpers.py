@@ -23,7 +23,7 @@ utils.logging.set_verbosity_error()
 def load_all(model_name="gpt2", device='cpu'):
     cur_dir = os.listdir()
     
-    if model_name + '_tokenizer' in str(cur_dir):
+    if model_name + '_tokenizer' in cur_dir:
         print('Loading tokenizer...')
         tokenizer = torch.load(model_name + '_tokenizer')
     else:
@@ -37,7 +37,7 @@ def load_all(model_name="gpt2", device='cpu'):
     pad_token_id=tokenizer.eos_token_id
 
 
-    if model_name + '_model' in str(cur_dir):
+    if model_name + '_model' in cur_dir:
         print('Loading model...')
         model = torch.load(model_name + '_model').to(device)
     else:
@@ -59,7 +59,26 @@ def load_all(model_name="gpt2", device='cpu'):
 
     return model, embeddings, tokenizer
 
-def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constrain_size=True):
+def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, distance_type='cosine', overwrite=False, save_dir='', equal_clusters=False):
+     
+    def dist(embeddings, centroids):
+        if distance_type == 'cosine':
+            distances = 1-cos_sim(embeddings, centroids)
+        else:
+            distances = torch.cdist(embeddings, centroids, p=2)
+        return distances
+
+        
+    centroid_fname = str(embeddings.shape) + '_' + str(num_clusters) + '_' + str(seed) + '_e' + str(equal_clusters) + '_' + distance_type + '_centroids'
+    cluster_fname = str(embeddings.shape) + '_' + str(num_clusters) + '_' + str(seed) + '_e' + str(equal_clusters) + '_' + distance_type + '_cluster'
+
+    if not overwrite:
+        cur_dir = os.listdir()
+        if centroid_fname in cur_dir:
+            print('Loading clusters...')
+            return torch.load(cluster_fname), torch.load(centroid_fname)
+
+    print('Finding clusters...')
     if seed != -1:
         torch.manual_seed(seed) 
     cluster_size = embeddings.shape[0]//num_clusters
@@ -73,48 +92,38 @@ def kkmeans(embeddings, num_clusters, threshold=0, max_iter=300, seed=-1, constr
         i += 1
 
         # (vocab_len, num_clusters) Euclidean distances of all token embeddings from each of the centroids.
-        distances = 1-cos_sim(embeddings, centroids)
+        distances = dist(embeddings, centroids)
         
         #(vocab_len, num_cluster), for each token embedding recording the sorted distances to each centroid, and the corresponding sorted centroid indexes.
-        closest_distance, closest_centroid = torch.min(distances, dim=-1)
-        clusters = [embeddings[(closest_centroid==i)] for i in range(num_clusters)]
+        closest_distance, closest_centroid = torch.sort(distances, dim=-1)
+        clusters = [embeddings[(closest_centroid[:,0]==i)] for i in range(num_clusters)]
 
-        new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
-        movement = torch.norm(new_centroids - centroids, dim=-1).mean()
-        centroids = new_centroids
+        if equal_clusters:
+            for c in range(num_clusters):
+                if clusters[c].shape[0] > cluster_size:
+                    #sort cluster embs by distance from centroid so spares are furthest away
+                    _, sorted_cluster_embs_ix = torch.sort(dist(clusters[c], clusters[c].mean(dim=0).unsqueeze(0)).squeeze(-1))
+                    clusters[c] = clusters[c][sorted_cluster_embs_ix]
+                    spare_embs = clusters[c][cluster_size:]
+                    clusters[c] = clusters[c][:cluster_size]
+                    for cc in range(num_clusters):
+                        if clusters[cc].shape[0] < cluster_size:
+                            #sort spare embs by distance from current cluster centroid so nearest ones are added 
+                            _, sorted_spare_embs_ix = torch.sort(dist(spare_embs, clusters[cc].mean(dim=0).unsqueeze(0)).squeeze(-1))
+                            free_space = cluster_size - clusters[cc].shape[0]
+                            clusters[cc] = torch.cat([clusters[cc], spare_embs[sorted_spare_embs_ix][:free_space]])
+                            spare_embs = spare_embs[free_space:]
         
-
-        if constrain_size:
-            sizes, sizes_ix = torch.sort(torch.tensor([c.shape[0] for c in clusters]), descending=True)
-            sorted_clusters = [clusters[ci] for ci in sizes_ix]
-
-            for cluster_ix in range(num_clusters-1):
-                if sizes[cluster_ix] > cluster_size:  # if a cluster is larger than target size
-
-                    #get extra embeddings
-                    spare_embeddings = sorted_clusters[cluster_ix][cluster_size:]
-                    #truncate cluster at cluster_size
-                    sorted_clusters[cluster_ix] = sorted_clusters[cluster_ix][:cluster_size]
-
-                    # redistribute extra embeddings
-                    # get other centroids
-                    remaining_centroids = torch.stack([ci.mean(dim=0) for ci in sorted_clusters[cluster_ix+1:]])
-
-                    # calculate distance from extra embeddings to other centroids
-                    spare_distances = 1 - cos_sim(spare_embeddings, remaining_centroids)
-
-                    #get closest remianing centroid for each extra embedding
-                    closest_spare_dist, closest_spare_centroid = torch.min(spare_distances, dim=-1)
-                    
-                    #update clusters
-                    for ci in range(num_clusters-cluster_ix-1):
-                        sorted_clusters[cluster_ix+ci+1] = torch.cat([sorted_clusters[cluster_ix+ci+1], spare_embeddings[closest_spare_centroid==ci]])
-                    
-                    clusters = sorted_clusters
-                    sizes = torch.tensor([c.shape[0] for c in clusters])
+        
+        new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
+        movement = torch.abs(new_centroids - centroids).mean()
+        print(movement)
+        centroids = new_centroids
 
     centroids = torch.stack([c.mean(dim=0) for c in clusters])
     print([c.shape[0] for c in clusters])
+    torch.save(clusters, save_dir + cluster_fname)
+    torch.save(centroids, save_dir + centroid_fname)
     return clusters, centroids
 
 
@@ -145,12 +154,17 @@ def cos_sim(A, B, dim=1, eps=1e-8):
       return torch.div(numerator, denominator)
 
 
-def closest_tokens(emb, word_embeddings, tokenizer, n=1):      
+def closest_tokens(emb, word_embeddings, tokenizer, n=1, distance_type='cosine'):      
 # This finds the n tokens in the vocabulary that are closest in the embedding space (in terms of Euclidean distance) to a given word embedding (‘emb’).
 # Note that here 'emb' may or may not correspond to a token (i.e., it may or may not be a 'legal' embedding).
 # Function returns a 4-tuple (list of the n tokens, list of their indices, list of their distances from emb, and list of their embedding vectors)
+    torch.cuda.empty_cache()
+    
+    if distance_type=='cosine':
+        dists = 1-cos_sim(emb.unsqueeze(0), word_embeddings).squeeze(0).squeeze(0)
+    else:
+        dists = torch.linalg.norm(word_embeddings - emb, dim=1)
 
-    dists = 1-cos_sim(emb.unsqueeze(0), word_embeddings).squeeze(0).squeeze(0)
     sorted_dists, ix = torch.sort(dists)
 
     # sorted_dists is a list of all embedding distances from 'emb', across entire vocab, sorted in increasing order, 
@@ -219,5 +233,4 @@ def perplexity(logits):
     # subtracting 1 guarantees perplexity 0 in limit of case of total certainty
 
     return perp
-
 
