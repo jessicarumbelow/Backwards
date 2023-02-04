@@ -10,7 +10,6 @@ import os
 from collections import Counter
 import random
 
-os.environ["WANDB_API_KEY"] = "4c2a9ff74fdb68f1f92a87d2ff834315f06a3530"
 os.environ["WANDB_SILENT"] = "true"
 
 
