@@ -1,6 +1,0 @@
-*.gdoc
-*.gsheet
-*_model*
-*_tokenizer*
-wandb/
-
