@@ -69,13 +69,16 @@ def load_all(model_name="gpt2", device='cpu', save_dir=''):
 
 
 def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, overwrite=False,
-            save_dir='', equal_clusters=False):
+            save_dir='', equal_clusters=False, cluster_dim=-1):
+
+    if cluster_dim != -1 and equal_clusters:
+        print('WARNING! Equal clusters not supported for dimension clustering.')
     embeddings = embeddings.detach()
 
     centroid_fname = str(embeddings.shape[0]) + '_' + str(embeddings.shape[1]) + '_' + str(num_clusters) + '_' + str(
-        equal_clusters) + '_' + str(seed) + '_centroids'
+        equal_clusters) + '_' + str(seed) + ' dim' + str(cluster_dim) + '_centroids'
     cluster_fname = str(embeddings.shape[0]) + '_' + str(embeddings.shape[1]) + '_' + str(num_clusters) + '_' + str(
-        equal_clusters) + '_' + str(seed) + '_cluster'
+        equal_clusters) + '_' + str(seed) + ' dim' + str(cluster_dim) + '_cluster'
 
     if not overwrite:
         cur_dir = os.listdir()
@@ -96,8 +99,13 @@ def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, 
     while movement > threshold and i < max_iter:
         i += 1
 
+        print(embeddings.shape, centroids.shape)
         # (vocab_len, num_clusters) Euclidean distances of all token embeddings from each of the centroids.
-        distances = 1 - (embeddings @ centroids.T)
+        if cluster_dim > -1:
+            distances = 1 - (embeddings[:, cluster_dim] @ centroids[cluster_dim].T)
+
+        else:
+            distances = 1 - (embeddings @ centroids.T)
 
         # (vocab_len, num_cluster), for each token embedding recording the sorted distances to each centroid, and the corresponding sorted centroid indexes.
         closest_distance, closest_centroid = torch.sort(distances, dim=-1)
@@ -116,6 +124,7 @@ def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, 
                     for cc in range(num_clusters):
                         if clusters[cc].shape[0] < cluster_size:
                             # sort spare embs by distance from current cluster centroid so nearest ones are added
+
                             _, sorted_spare_embs_ix = torch.sort(
                                 1 - (spare_embs @ clusters[cc].mean(dim=0).unsqueeze(0).T).squeeze(-1))
 
