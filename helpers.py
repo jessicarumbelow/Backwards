@@ -102,10 +102,10 @@ def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, 
         print(embeddings.shape, centroids.shape)
         # (vocab_len, num_clusters) Euclidean distances of all token embeddings from each of the centroids.
         if cluster_dim > -1:
-            distances = torch.cdist(embeddings[:, cluster_dim], centroids[cluster_dim])
+            distances = 1 - (embeddings[:, cluster_dim] @ centroids[cluster_dim].T)
 
         else:
-            distances = torch.cdist(embeddings, centroids)
+            distances = 1 - (embeddings @ centroids.T)
 
         # (vocab_len, num_cluster), for each token embedding recording the sorted distances to each centroid, and the corresponding sorted centroid indexes.
         closest_distance, closest_centroid = torch.sort(distances, dim=-1)
@@ -116,7 +116,7 @@ def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, 
                 if clusters[c].shape[0] > cluster_size:
                     # sort cluster embs by distance from centroid so spares are furthest away
                     _, sorted_cluster_embs_ix = torch.sort(
-                        torch.cdist(clusters[c], clusters[c].mean(dim=0).unsqueeze(0)).squeeze(-1))
+                        1 - (clusters[c] @ clusters[c].mean(dim=0).unsqueeze(0).T).squeeze(-1))
 
                     clusters[c] = clusters[c][sorted_cluster_embs_ix]
                     spare_embs = clusters[c][cluster_size:]
@@ -126,18 +126,18 @@ def kkmeans(embeddings, num_clusters, threshold=0.00001, max_iter=1000, seed=0, 
                             # sort spare embs by distance from current cluster centroid so nearest ones are added
 
                             _, sorted_spare_embs_ix = torch.sort(
-                                torch.cdist(spare_embs, clusters[cc].mean(dim=0).unsqueeze(0)).squeeze(-1))
+                                1 - (spare_embs @ clusters[cc].mean(dim=0).unsqueeze(0).T).squeeze(-1))
 
                             free_space = cluster_size - clusters[cc].shape[0]
                             clusters[cc] = torch.cat([clusters[cc], spare_embs[sorted_spare_embs_ix][:free_space]])
                             spare_embs = spare_embs[free_space:]
 
-        new_centroids = torch.stack([c.mean(dim=0) for c in clusters])
+        new_centroids = torch.stack([c.mean(dim=0)/torch.sqrt(torch.sum(c.mean(dim=0)**2, dim=-1, keepdim=True)) for c in clusters])
         movement = torch.abs(new_centroids - centroids).mean()
         print('Movement :', movement)
         centroids = new_centroids
 
-    centroids = torch.stack([c.mean(dim=0) for c in clusters])
+    centroids = torch.stack([c.mean(dim=0)/torch.sqrt(torch.sum(c.mean(dim=0)**2, dim=-1, keepdim=True)) for c in clusters])
     print([c.shape[0] for c in clusters])
     torch.save(clusters, save_dir + cluster_fname)
     torch.save(centroids, save_dir + centroid_fname)
@@ -166,7 +166,7 @@ def closest_tokens(emb, word_embeddings, tokenizer, n=1):
     # Note that here 'emb' may or may not correspond to a token (i.e., it may or may not be a 'legal' embedding).
     # Function returns a 4-tuple (list of the n tokens, list of their indices, list of their distances from emb, and list of their embedding vectors)
     torch.cuda.empty_cache()
-    dists = torch.cdist(emb.unsqueeze(0), word_embeddings).squeeze(0)
+    dists = 1 - (emb.unsqueeze(0) @ word_embeddings.T).squeeze(0)
     sorted_dists, ix = torch.sort(dists)
 
     # sorted_dists is a list of all embedding distances from 'emb', across entire vocab, sorted in increasing order,
