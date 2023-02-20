@@ -58,8 +58,6 @@ def optimise_input(model,
     # tokenizer.encode(target_output, return_tensors='pt') is a list containing this one tensor, hence the need for the [0]
     # "return_tensors='pt'" ensures that we get a tensor in PyTorch format
 
-    word_embeddings = word_embeddings / torch.sqrt(torch.sum(word_embeddings**2, dim=-1, keepdim=True))
-
     optimised_inputs = set()
     optimised_tokens = []
     metrics_table = wandb.Table(columns=['Input', 'Output', 'Loss', 'Perplexity', 'Distance', 'Probs'])
@@ -101,8 +99,7 @@ def optimise_input(model,
     #  validation loss stops improving for 'patience' (here 20) epochs, and will wait 'cooldown' (here 20) epochs before resuming normal operation.
 
     for e in range(epochs):
-        norm_input = input / torch.sqrt(torch.sum(input**2, dim=-1, keepdim=True))
-        logits, emb, perp = model_emb(model, norm_input,
+        logits, emb, perp = model_emb(model, input,
                                       word_embeddings, output_len)
         # Does forward pass on a 'clamped' version of the 'input' tensor (which constrains it for each dimension to the range of all token embeddings)
         # Iterates to produce an output of output_len tokens,
@@ -130,7 +127,7 @@ def optimise_input(model,
             # target_logits now of shape (batch_size, output_len)
 
         token_dist, closest_ix = [], []
-        for b in norm_input:
+        for b in input:
             tds, cixs = [], []
             for be in b:
                 _, cix, td, _ = closest_tokens(be, word_embeddings, tokenizer)
@@ -188,8 +185,6 @@ def optimise_input(model,
 
                     data = [[label, val] for (label, val) in zip(labels, values)]
                     table = wandb.Table(data=data, columns=["Token", "Count"])
-                    wandb.log({"token_freqs": wandb.plot.bar(table, "Token",
-                                                             "Count", title="Token Freqs")})
 
                     done = tokenizer.decode(model_outs[b])
                     optimised_inputs.add(done)
@@ -197,7 +192,8 @@ def optimise_input(model,
                                              tokenizer.decode(model_outs[b][input_len:])] + torch.stack(
                         [loss.squeeze(-1)[b].mean(), perp[b], token_dist.mean(dim=1)[b]], dim=-1).tolist() + [target_probs[
                                                 b].tolist()])
-                    wandb.log({'Optimised Inputs': wandb.Html(
+                    wandb.log({"Epoch":e,"token_freqs": wandb.plot.bar(table, "Token",
+                                                             "Count", title="Token Freqs"),'Optimised Inputs': wandb.Html(
                         ''.join(['<p>{}.{}</p>'.format(i, repr(s)) for i, s in enumerate(optimised_inputs)]))})
 
                 if no_reinit == False:
